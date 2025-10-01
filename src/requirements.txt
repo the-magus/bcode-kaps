@@ -1,0 +1,6 @@
+azure-functions
+beautifulsoup4
+qrcode
+Pillow
+pytest
+azure-storage-blob

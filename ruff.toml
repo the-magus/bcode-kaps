@@ -1,0 +1,10 @@
+# Same as Black.
+line-length = 88
+indent-width = 4
+
+# Assume Python 3.11.
+target-version = "py311"
+
+[lint]
+# Enable Pyflakes and pycodestyle rules.
+select = ["E", "F"]
