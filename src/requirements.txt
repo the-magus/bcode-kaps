@@ -1,0 +1,5 @@
+azure-functions
+beautifulsoup4
+python-barcode
+pytest
+azure-storage-blob
