@@ -2,8 +2,15 @@ import azure.functions as func
 import logging
 import zipfile
 from bs4 import BeautifulSoup
-import barcode
-from barcode.writer import ImageWriter
+import qrcode
+from PIL import Image, ImageDraw, ImageFont
+
+# set the base directory to the directory of the script file so that the script can be run from anywhere and still
+# access the required files in the same directory as the script file (e.g. fonts) using relative paths instead of
+# absolute paths (which would be different depending on where the script is run from) - this is useful for creating
+# standalone executables using PyInstaller or similar tools that bundle the script and its dependencies into a single
+# executable file that can be run without needing to install Python or any dependencies on the target machine.
+basedir = os.path.dirname(__file__)
 import tempfile
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -47,7 +54,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         po_number = variants[0]['po_number']
         barcode_files = []
         for variant in variants:
-            barcode_path = generate_barcode(variant['item_code'])
+            barcode_path = generate_barcode(variant['item_code'], variant['description'])
             barcode_files.append(barcode_path)
 
         zip_path = f"/tmp/{po_number}.zip"
@@ -98,21 +105,73 @@ def parse_html_email(html_content):
         })
     return variants
 
-def generate_barcode(variant_code):
+def generate_barcode(variant_code, description):
     """
-    Generates a barcode image for the given variant code.
+    Generates a barcode image for the given variant code and description.
 
     Args:
         variant_code: The variant code to generate the barcode for.
+        description: The description to include in the barcode image.
 
     Returns:
         The path to the generated barcode image.
     """
-    code128 = barcode.get_barcode_class('code128')
-    barcode_image = code128(variant_code, writer=ImageWriter())
     temp_dir = tempfile.gettempdir()
-    filename = barcode_image.save(f'{temp_dir}/{variant_code}')
-    return filename
+    barcode_file_path = os.path.join(temp_dir, variant_code)
+
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(variant_code)
+    qr.make(fit=True)
+    qr_image = qr.make_image(fill_color="black", back_color="white")
+    qr_image.resize((10, 10))
+    dpi = 300
+    width = int(70 * 0.0393701 * dpi)
+    height = int(30 * 0.0393701 * dpi)
+    new_image = Image.new("RGB", (width, height), "white")
+
+    # Paste the QR code to the top right corner
+    new_image.paste(qr_image, ((width // 2) + 130, 40))
+
+    # Add text
+    draw = ImageDraw.Draw(new_image)
+    main_font = ImageFont.truetype(os.path.join(basedir, "arial.ttf"), 45)
+    bold_font = ImageFont.truetype(os.path.join(basedir, "arialbd.ttf"), 100)
+    draw.text((30, 30), variant_code, font=bold_font, fill=(0, 0, 0))
+    description_words = description.split(" ")
+    max_line_width = (new_image.width // 2) + 90
+    wrapped_description = wrap_text(description_words, main_font, max_line_width)
+    draw.text((30, 160), wrapped_description, font=main_font, fill=(0, 0, 0))
+    new_image.save(barcode_file_path + ".png")
+    return barcode_file_path + ".png"
+
+def wrap_text(words: list[str], font: ImageFont.ImageFont, max_line_width_: int) -> str:
+    """
+    Wraps text to fit within a specified width.
+    :param words: The text to wrap as a list of words
+    :param font: The font to use for calculating the text size
+    :param max_line_width_: The maximum width of the text line
+    :return: The wrapped text as a string with newline characters
+    """
+    lines = []
+    current_line = []
+    for word in words:
+        # If adding a new word doesn't exceed the max width, add the word to current line
+        if font.getlength(' '.join(current_line + [word])) <= max_line_width_:
+            current_line.append(word)
+        else:
+            # If it does, add current line to lines and start a new line
+            lines.append(' '.join(current_line))
+            current_line = [word]
+    # Add the last line
+    if current_line:
+        lines.append(' '.join(current_line))
+
+    return '\n'.join(lines)
 
 def send_email_with_attachment(sender_email, receiver_email, subject, body, attachment_path):
     """

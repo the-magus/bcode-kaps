@@ -1,5 +1,6 @@
 azure-functions
 beautifulsoup4
-python-barcode
+qrcode
+Pillow
 pytest
 azure-storage-blob
