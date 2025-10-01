@@ -88,6 +88,7 @@ When creating this spec from a user prompt:
 *GATE: Automated checks run during main() execution*
 
 ### Content Quality
+- [ ] Aligns with project constitution
 - [ ] No implementation details (languages, frameworks, APIs)
 - [ ] Focused on user value and business needs
 - [ ] Written for non-technical stakeholders

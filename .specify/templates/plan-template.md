@@ -1,4 +1,3 @@
-
 # Implementation Plan: [FEATURE]
 
 **Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
@@ -47,7 +46,13 @@
 ## Constitution Check
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+*   **I. First Principles Approach**: Does the plan break down the problem to its fundamental truths?
+*   **II. Thorough Documentation**: Does the plan include tasks for creating a README, and adding docstrings to every file, class, and function, and comments where necessary?
+*   **III. Testing**: Does the plan include tasks for writing tests, preferably using TDD?
+*   **IV. Verify > Assumptions**: Does the plan have steps to verify assumptions?
+*   **V. AI Must Ask Clarifying Questions**: Is the plan clear enough for an AI to execute, or does it need more clarification?
+*   **VI. KISS: Keep It Simple, Stupid**: Is the proposed solution the simplest possible?
+*   **VII. Simple Explanations**: Are the explanations in the plan simple and easy to understand?
 
 ## Project Structure
 
@@ -216,4 +221,4 @@ directories captured above]
 - [ ] Complexity deviations documented
 
 ---
-*Based on Constitution v2.1.1 - See `/memory/constitution.md`*
+*Based on Constitution v1.0.2 - See `/.specify/memory/constitution.md`*
