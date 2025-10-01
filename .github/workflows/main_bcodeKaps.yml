@@ -1,0 +1,44 @@
+name: Deploy Python Function App to Azure
+
+on:
+  push:
+    branches:
+      - 002-azure-barcode-generator
+
+env:
+  AZURE_FUNCTIONAPP_NAME: bcodeKaps    # set this to your function app name
+  PYTHON_VERSION: '3.10'                 # set this to the python version you plan to use
+  REQUIREMENTS_TXT: 'src/requirements.txt' # set this to the path to your requirements.txt file
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 'Checkout GitHub Action'
+      uses: actions/checkout@v4
+
+    - name: 'Resolve Project Path'
+      id: resolve_path
+      run: |
+        echo "PROJECT_PATH=$(pwd)" >> $GITHUB_ENV
+
+    - name: 'Set up Python version'
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: 'Install dependencies'
+      run: pip install -r ${{ env.REQUIREMENTS_TXT }}
+
+    - name: 'Zip project contents'
+      run: |
+        zip -r deployment.zip . -x '*.git*' '*__pycache__*' '*.pytest_cache*' '*.gemini*'
+
+    - name: 'Deploy to Azure Function App'
+      uses: Azure/functions-action@v1
+      with:
+        app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+        package: deployment.zip
+        publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+        scm-do-build-during-deployment: true
+        enable-oryx-build: true
