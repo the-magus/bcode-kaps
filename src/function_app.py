@@ -374,6 +374,7 @@ def process_email(
 app = func.FunctionApp()
 
 
+@app.function_name(name="barcode_generator")
 @app.route(route="barcode_generator")
 def main(req: func.HttpRequest) -> func.HttpResponse:
 	"""HTTP-triggered Azure Function entry point."""
