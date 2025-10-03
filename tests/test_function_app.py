@@ -1,98 +1,247 @@
+from pathlib import Path
+import zipfile
+from unittest.mock import ANY, MagicMock, patch
+
 import pytest
-import os
-from unittest.mock import patch
-from src.function_app import parse_html_email, generate_barcode, send_email_with_attachment, log_completed_purchase_order
 
-HTML_CONTENT = '''
-<html><head><title>Alert Summary - New PO Kaps</title><meta charset="utf-8">
-        <style>
-          body { font-size: 16px; word-break: break-word; white-space: pre-wrap; }
-        </style>
-        </head><body><!DOCTYPE html><html lang="en" xmlns="http://www.w3.org/1999/xhtml"><head>
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title></title>
-</head>
-<body style="margin:20px">
-    <p style="text-align:center; margin-bottom:25px;">
-        <img src="https://www.orderwise.co.uk/wp-content/uploads/2018/10/OrderWise-business-software-Logo.png" alt="OrderWise" width="300" height="70">
-    </p>
+from src.function_app import (
+    Variant,
+    bundle_barcodes,
+    build_email_subject,
+    generate_barcode_image,
+    handle_malformed_email,
+    log_completed_purchase_order,
+    process_email,
+    parse_html_email,
+    send_email_with_attachment,
+    verify_sender,
+)
 
-    <center><b style="color:#515151; font-family:Arial; font-size:30px;">New PO Kaps</b></center>
 
-    <center><p style="color:#515151; font-family:Arial; margin-top:10px; font-size:18px;">122 alerts generated</p></center>
+SAMPLE_HTML = """
+<html>
+  <body>
+    <table>
+      <tr>
+        <td style="font-family:Arial; font-size:14px; color:gray; padding-top:10px;">
+          PO: UPD-PO27652 | Item: V109327 | Desc: Children must not play on this site 200mm x 300mm - 1mm Rigid Plastic Sign
+        </td>
+      </tr>
+      <tr>
+        <td style="font-family:Arial; font-size:14px; color:gray; padding-top:10px;">
+          PO: UPD-PO27652 | Item: V109328 | Desc: Fire exit 150mm x 150mm - Self Adhesive Vinyl
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
 
-    <div style="width:100%">
-        <div style="width:80%; margin: 0 auto;">
-            <table>
-                <tr>
-                            <td width="100%" style="font-size:18px; font-family:Arial; font-weight:bold; color:#515151;">Account Number: TS11892</td>
-                            <th rowspan="3&lt;/th">
-                        </tr>
-                        <tr style="font-size:12px; font-family:Arial; color:#515151;">
-                            <td>Supplier Name: Kaps Finishing Ltd</td>
-                        </tr><tr>
-                            <td style="font-family:Arial; font-size:14px; color:gray; padding-top:10px;">PO: UPD-PO27652 | Item: V109327 | Desc: Children must not play on this site 200mm x 300mm - 1mm Rigid Plastic Sign</td>
-                        </tr><tr>
-                            <td colspan="2"><hr size="0" style="color:lightgray; font-size:0px;"></td>
-                        </tr>
-            </table>
-        </div>
-    </div>
-</body></html></body></html>
-'''
 
-def test_parse_html_email():
-    expected_data = [
-        {
-            'po_number': 'UPD-PO27652',
-            'item_code': 'V109327',
-            'description': 'Children must not play on this site 200mm x 300mm - 1mm Rigid Plastic Sign'
-        }
+def test_parse_html_email_returns_variants():
+    variants = parse_html_email(SAMPLE_HTML)
+
+    assert variants == [
+        Variant(
+            po_number="UPD-PO27652",
+            item_code="V109327",
+            description="Children must not play on this site 200mm x 300mm - 1mm Rigid Plastic Sign",
+        ),
+        Variant(
+            po_number="UPD-PO27652",
+            item_code="V109328",
+            description="Fire exit 150mm x 150mm - Self Adhesive Vinyl",
+        ),
     ]
-    assert parse_html_email(HTML_CONTENT) == expected_data
 
-def test_generate_barcode():
-    variant_code = "V109327"
-    # The function should save the barcode to a file and return the path
-    barcode_path = generate_barcode(variant_code)
-    assert os.path.exists(barcode_path)
-    # Clean up the generated file
-    os.remove(barcode_path)
 
-@patch('smtplib.SMTP')
-def test_send_email_with_attachment(mock_smtp):
-    sender_email = "test@example.com"
-    receiver_email = "kaps@example.com"
-    subject = "Test Subject"
-    body = "Test Body"
-    attachment_path = "test.zip"
+def test_po_number_used_for_zipfile_and_subject(tmp_path: Path):
+    variants = parse_html_email(SAMPLE_HTML)
+    po_number = variants[0].po_number
 
-    # Create a dummy attachment file
-    with open(attachment_path, "w") as f:
-        f.write("test content")
+    barcode_dir = tmp_path / "barcodes"
+    barcode_dir.mkdir()
+    files = []
+    for index, variant in enumerate(variants):
+        file_path = barcode_dir / f"{variant.item_code}_{index}.png"
+        file_path.write_bytes(b"fake-barcode")
+        files.append(file_path)
 
-    send_email_with_attachment(sender_email, receiver_email, subject, body, attachment_path)
+    zip_path = bundle_barcodes(po_number, files, output_dir=tmp_path)
 
-    # Check that the SMTP server was connected to
-    mock_smtp.assert_called_with("smtp.test.com", 587)
-    # Check that the email was sent
-    instance = mock_smtp.return_value
-    assert instance.sendmail.call_count == 1
+    assert zip_path.name == f"{po_number}.zip"
+    assert build_email_subject(po_number) == f"Barcodes for PO {po_number}"
 
-    # Clean up the dummy attachment file
-    os.remove(attachment_path)
 
-@patch('src.function_app.BlobServiceClient')
-def test_log_completed_purchase_order(mock_blob_service_client, monkeypatch):
-    monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=test;EndpointSuffix=core.windows.net")
+def test_bundle_barcodes_contains_all_files(tmp_path: Path):
     po_number = "UPD-PO27652"
-    
-    mock_blob_client = mock_blob_service_client.from_connection_string.return_value.get_blob_client.return_value
-    mock_blob_client.get_blob_properties.side_effect = Exception()
+    barcodes = []
+    for suffix in ("A", "B"):
+        path = tmp_path / f"barcode_{suffix}.png"
+        path.write_bytes(suffix.encode())
+        barcodes.append(path)
 
-    log_completed_purchase_order(po_number)
+    zip_path = bundle_barcodes(po_number, barcodes, output_dir=tmp_path)
 
-    # Check that the blob client was created
-    mock_blob_service_client.from_connection_string.assert_called_once()
-    # Check that a blob was uploaded
-    assert mock_blob_client.upload_blob.call_count == 1
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        assert set(archive.namelist()) == {path.name for path in barcodes}
+
+
+def test_generate_barcode_image_creates_file(tmp_path: Path):
+    barcode_path = generate_barcode_image("V109327", output_dir=tmp_path)
+
+    assert barcode_path.exists()
+    assert barcode_path.parent == tmp_path
+
+
+def test_send_email_with_attachment_uses_zip(tmp_path: Path):
+    attachment = tmp_path / "test.zip"
+    attachment.write_bytes(b"zip-bytes")
+
+    with patch("src.function_app.smtplib.SMTP") as smtp_mock:
+        send_email_with_attachment(
+            sender_email="sender@example.com",
+            receiver_email="kaps@example.com",
+            subject="Barcodes for PO 123",
+            body="Body",
+            attachment_path=attachment,
+            smtp_host="smtp.test.com",
+            smtp_port=587,
+        )
+
+        smtp_mock.assert_called_once_with("smtp.test.com", 587)
+        server = smtp_mock.return_value.__enter__.return_value
+        args, kwargs = server.sendmail.call_args
+        assert args[0] == "sender@example.com"
+        assert args[1] == ["kaps@example.com"]
+        assert "Barcodes for PO 123" in args[2]
+        assert "test.zip" in args[2]
+        assert kwargs == {}
+
+
+def test_verify_sender_accepts_authorized_address():
+    verify_sender("wms@example.com", "wms@example.com")
+
+
+def test_verify_sender_rejects_unexpected_address():
+    with pytest.raises(PermissionError):
+        verify_sender("intruder@example.com", "wms@example.com")
+
+
+def test_handle_malformed_email_logs_and_notifies(caplog):
+    notifier = MagicMock()
+
+    with caplog.at_level("ERROR"):
+        handle_malformed_email(
+            error=ValueError("Unparseable email"),
+            admin_email="admin@example.com",
+            notify_admin=notifier,
+        )
+
+    notifier.assert_called_once()
+    called_args, called_kwargs = notifier.call_args
+    assert called_args[0] == "admin@example.com"
+    assert "Malformed purchase order email" in called_kwargs["subject"]
+    assert "Unparseable email" in called_kwargs["body"]
+    assert "Unparseable email" in caplog.text
+
+
+def test_log_completed_purchase_order_appends_entry(tmp_path: Path):
+    blob_service = MagicMock()
+    blob_client = blob_service.get_blob_client.return_value
+
+    download_blob = MagicMock()
+    download_blob.readall.return_value = b"existing\n"
+    blob_client.download_blob.return_value = download_blob
+
+    log_completed_purchase_order(
+        po_number="UPD-PO27652",
+        blob_service=blob_service,
+        container_name="completed-purchase-orders",
+    )
+
+    blob_service.get_blob_client.assert_called_once_with(
+        container="completed-purchase-orders",
+        blob=ANY,
+    )
+    upload_args, upload_kwargs = blob_client.upload_blob.call_args
+    assert b"UPD-PO27652" in upload_args[0]
+    assert upload_kwargs == {"overwrite": True}
+
+
+def test_process_email_routes_messages_to_admin(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("WMS_SENDER_EMAIL", "wms@example.com")
+    monkeypatch.setenv("SENDER_EMAIL", "noreply@example.com")
+    monkeypatch.setenv("KAPS_EMAIL", "kaps@example.com")
+    monkeypatch.setenv("ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.delenv("EMAIL_VERIFICATION_MODE", raising=False)
+
+    working_dir = tmp_path / "work"
+    working_dir.mkdir()
+    monkeypatch.setattr("src.function_app.tempfile.mkdtemp", lambda prefix=None: str(working_dir))
+
+    def fake_generate(item_code: str, output_dir: Path) -> Path:
+        path = Path(output_dir) / f"{item_code}.png"
+        path.write_bytes(b"barcode")
+        return path
+
+    def fake_bundle(po_number: str, barcode_paths, output_dir: Path | None = None) -> Path:
+        path = Path(output_dir or working_dir) / f"{po_number}.zip"
+        path.write_bytes(b"zip")
+        return path
+
+    with (
+        patch("src.function_app.generate_barcode_image", side_effect=fake_generate),
+        patch("src.function_app.bundle_barcodes", side_effect=fake_bundle),
+        patch("src.function_app.send_email_with_attachment") as send_email_mock,
+    ):
+        message = process_email(
+            email_body=SAMPLE_HTML,
+            sender="wms@example.com",
+            notify_admin=lambda *_args, **_kwargs: None,
+            blob_service=MagicMock(),
+        )
+
+    assert message == "Successfully processed PO UPD-PO27652."
+    send_email_mock.assert_called_once()
+    kwargs = send_email_mock.call_args.kwargs
+    assert kwargs["receiver_email"] == "admin@example.com"
+    assert kwargs["sender_email"] == "noreply@example.com"
+
+
+def test_process_email_can_target_kaps_when_verification_disabled(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("WMS_SENDER_EMAIL", "wms@example.com")
+    monkeypatch.setenv("SENDER_EMAIL", "noreply@example.com")
+    monkeypatch.setenv("KAPS_EMAIL", "kaps@example.com")
+    monkeypatch.setenv("ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("EMAIL_VERIFICATION_MODE", "false")
+
+    working_dir = tmp_path / "prod"
+    working_dir.mkdir()
+    monkeypatch.setattr("src.function_app.tempfile.mkdtemp", lambda prefix=None: str(working_dir))
+
+    def fake_generate(item_code: str, output_dir: Path) -> Path:
+        path = Path(output_dir) / f"{item_code}.png"
+        path.write_bytes(b"barcode")
+        return path
+
+    def fake_bundle(po_number: str, barcode_paths, output_dir: Path | None = None) -> Path:
+        path = Path(output_dir or working_dir) / f"{po_number}.zip"
+        path.write_bytes(b"zip")
+        return path
+
+    with (
+        patch("src.function_app.generate_barcode_image", side_effect=fake_generate),
+        patch("src.function_app.bundle_barcodes", side_effect=fake_bundle),
+        patch("src.function_app.send_email_with_attachment") as send_email_mock,
+    ):
+        process_email(
+            email_body=SAMPLE_HTML,
+            sender="wms@example.com",
+            notify_admin=lambda *_args, **_kwargs: None,
+            blob_service=MagicMock(),
+        )
+
+    send_email_mock.assert_called_once()
+    kwargs = send_email_mock.call_args.kwargs
+    assert kwargs["receiver_email"] == "kaps@example.com"

@@ -1,233 +1,393 @@
-import azure.functions as func
-import logging
-import zipfile
-from bs4 import BeautifulSoup
-import qrcode
-from PIL import Image, ImageDraw, ImageFont
+"""Azure Function entry point for the barcode generator workflow.
 
-# set the base directory to the directory of the script file so that the script can be run from anywhere and still
-# access the required files in the same directory as the script file (e.g. fonts) using relative paths instead of
-# absolute paths (which would be different depending on where the script is run from) - this is useful for creating
-# standalone executables using PyInstaller or similar tools that bundle the script and its dependencies into a single
-# executable file that can be run without needing to install Python or any dependencies on the target machine.
-basedir = os.path.dirname(__file__)
-import tempfile
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.mime.text import MIMEText
-from email import encoders
-import os
-from azure.storage.blob import BlobServiceClient
+This module provides composable helpers for parsing purchase order emails,
+generating barcode assets, bundling them, emailing the supplier, and logging
+completion details to Azure Blob Storage. The Azure Function handler orchestrates
+the workflow while keeping side effects isolated for testability.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
 from datetime import datetime
-import azure.functions as func
+from pathlib import Path
+from typing import Callable, Iterable, List, Optional
+
 import logging
+import os
+import smtplib
+import tempfile
 import zipfile
+
+import azure.functions as func
+from azure.storage.blob import BlobServiceClient
+from bs4 import BeautifulSoup
+import barcode
+from barcode.writer import ImageWriter
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Variant:
+	"""Represents a single variant row parsed from the WMS email."""
+
+	po_number: str
+	item_code: str
+	description: str
+
+
+def parse_html_email(html_content: str) -> List[Variant]:
+	"""Parse the HTML body of the WMS email.
+
+	Args:
+		html_content: Raw HTML string sent by the WMS.
+
+	Returns:
+		A list of :class:`Variant` entries. An empty list indicates no
+		purchasable variants were found (e.g., a non-PO email).
+
+	Raises:
+		ValueError: If candidate rows exist but are malformed.
+	"""
+
+	if not html_content:
+		return []
+
+	soup = BeautifulSoup(html_content, "html.parser")
+	variants: List[Variant] = []
+	malformed_detected = False
+
+	for cell in soup.find_all(
+		"td",
+		style="font-family:Arial; font-size:14px; color:gray; padding-top:10px;",
+	):
+		text = cell.get_text(strip=True)
+		segments = [segment.strip() for segment in text.split("|")]
+		if len(segments) != 3:
+			malformed_detected = True
+			continue
+
+		try:
+			po_number = segments[0].split(":", 1)[1].strip()
+			item_code = segments[1].split(":", 1)[1].strip()
+			description = segments[2].split(":", 1)[1].strip()
+		except IndexError:
+			malformed_detected = True
+			continue
+
+		variants.append(Variant(po_number, item_code, description))
+
+	if not variants and malformed_detected:
+		raise ValueError("Email body did not contain well-formed purchase order rows.")
+
+	return variants
+
+
+def generate_barcode_image(item_code: str, output_dir: Optional[Path] = None) -> Path:
+	"""Generate a Code128 barcode image for a variant.
+
+	Args:
+		item_code: SKU for which to create the barcode.
+		output_dir: Directory where the file should be written. Defaults to the
+			system temporary directory.
+
+	Returns:
+		Path to the generated PNG file.
+	"""
+
+	target_dir = Path(output_dir or tempfile.gettempdir())
+	target_dir.mkdir(parents=True, exist_ok=True)
+
+	code128 = barcode.get_barcode_class("code128")
+	barcode_image = code128(item_code, writer=ImageWriter())
+	saved_path = Path(barcode_image.save(str(target_dir / item_code)))
+	return saved_path if saved_path.suffix else saved_path.with_suffix(".png")
+
+
+def bundle_barcodes(
+	po_number: str,
+	barcode_paths: Iterable[Path],
+	output_dir: Optional[Path] = None,
+) -> Path:
+	"""Bundle generated barcode files into a per-PO zip archive."""
+
+	target_dir = Path(output_dir or tempfile.gettempdir())
+	target_dir.mkdir(parents=True, exist_ok=True)
+	zip_path = target_dir / f"{po_number}.zip"
+
+	with zipfile.ZipFile(zip_path, "w") as archive:
+		for path in barcode_paths:
+			archive.write(path, arcname=Path(path).name)
+
+	return zip_path
+
+
+def build_email_subject(po_number: str) -> str:
+	"""Return the subject line used when emailing barcodes to Kaps."""
+
+	return f"Barcodes for PO {po_number}"
+
+
+def send_email_with_attachment(
+	*,
+	sender_email: str,
+	receiver_email: str,
+	subject: str,
+	body: str,
+	attachment_path: Optional[Path],
+	smtp_host: Optional[str] = None,
+	smtp_port: Optional[int] = None,
+) -> None:
+	"""Send an email, optionally attaching the provided file."""
+
+	smtp_host = smtp_host or os.getenv("SMTP_HOST", "smtp.test.com")
+	smtp_port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
+
+	message = MIMEMultipart()
+	message["From"] = sender_email
+	message["To"] = receiver_email
+	message["Subject"] = subject
+	message.attach(MIMEText(body, "plain"))
+
+	if attachment_path is not None:
+		with open(attachment_path, "rb") as attachment:
+			part = MIMEBase("application", "octet-stream")
+			part.set_payload(attachment.read())
+		encoders.encode_base64(part)
+		part.add_header(
+			"Content-Disposition",
+			f"attachment; filename={Path(attachment_path).name}",
+		)
+		message.attach(part)
+
+	with smtplib.SMTP(smtp_host, smtp_port) as server:
+		server.sendmail(sender_email, [receiver_email], message.as_string())
+
+
+def verify_sender(actual_sender: Optional[str], expected_sender: Optional[str]) -> None:
+	"""Ensure the inbound request originated from the configured WMS address."""
+
+	if not expected_sender:
+		raise PermissionError("Expected WMS sender email is not configured.")
+	if actual_sender != expected_sender:
+		raise PermissionError("Unauthorized sender.")
+
+
+def handle_malformed_email(
+	*,
+	error: Exception,
+	admin_email: Optional[str],
+	notify_admin: Callable[[str, str, str], None],
+) -> None:
+	"""Log and escalate malformed purchase order emails."""
+
+	LOGGER.error("Malformed purchase order email: %s", error)
+	if admin_email:
+		notify_admin(
+			admin_email,
+			subject="Malformed purchase order email",
+			body=str(error),
+		)
+
+
+def log_completed_purchase_order(
+	*,
+	po_number: str,
+	blob_service: Optional[BlobServiceClient] = None,
+	container_name: str = "completed-purchase-orders",
+) -> None:
+	"""Append a completion record for the purchase order to Azure Blob Storage."""
+
+	if blob_service is None:
+		connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+		if not connection_string:
+			raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING is not configured.")
+		blob_service = BlobServiceClient.from_connection_string(connection_string)
+
+	blob_name = f"completed_pos_{datetime.utcnow().strftime('%Y-%m-%d')}.log"
+	blob_client = blob_service.get_blob_client(container=container_name, blob=blob_name)
+
+	entry = f"{datetime.utcnow().isoformat()}: {po_number}\n".encode("utf-8")
+
+	try:
+		existing = blob_client.download_blob().readall()
+	except Exception:  # Blob may not exist yet.
+		existing = b""
+
+	blob_client.upload_blob(existing + entry, overwrite=True)
+
+
+def build_email_body(po_number: str) -> str:
+	"""Construct the body of the email sent to Kaps."""
+
+	return f"Please find attached the barcodes for purchase order {po_number}."
+
+
+def _resolve_recipient(env: dict[str, str]) -> str:
+	"""Determine who should receive outbound purchase order emails."""
+
+	verification_mode = os.getenv("EMAIL_VERIFICATION_MODE", "true").strip().lower()
+	if verification_mode in {"false", "0", "no", "off"}:
+		return env["KAPS_EMAIL"]
+
+	recipient = env["ADMIN_EMAIL"]
+	LOGGER.info(
+		"Email verification mode active; routing purchase order message to admin %s",
+		recipient,
+	)
+	return recipient
+
+
+def notify_admin_email(*, admin_email: str, sender_email: str, subject: str, body: str) -> None:
+	"""Notify the administrator about an error processing a purchase order."""
+
+	if not admin_email:
+		LOGGER.warning("Admin email not configured; skipping notification.")
+		return
+
+	send_email_with_attachment(
+		sender_email=sender_email,
+		receiver_email=admin_email,
+		subject=subject,
+		body=body,
+		attachment_path=None,
+	)
+
+
+def _cleanup_temp_directory(path: Path) -> None:
+	"""Best-effort removal of temporary assets."""
+
+	for child in path.glob("*"):
+		try:
+			child.unlink()
+		except OSError:
+			LOGGER.debug("Unable to delete temporary file %s", child, exc_info=True)
+	try:
+		path.rmdir()
+	except OSError:
+		LOGGER.debug("Unable to delete temporary directory %s", path, exc_info=True)
+
+
+def _load_required_env() -> dict[str, str]:
+	"""Retrieve required environment variables, raising if any are missing."""
+
+	required_keys = ["WMS_SENDER_EMAIL", "SENDER_EMAIL", "KAPS_EMAIL", "ADMIN_EMAIL"]
+	values = {}
+	missing = []
+	for key in required_keys:
+		value = os.getenv(key)
+		if value:
+			values[key] = value
+		else:
+			missing.append(key)
+	if missing:
+		raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+	return values
+
+
+def process_email(
+	*,
+	email_body: str,
+	sender: Optional[str],
+	notify_admin: Callable[[str, str, str], None],
+	blob_service: Optional[BlobServiceClient] = None,
+) -> str:
+	"""Core orchestration for processing a WMS email."""
+
+	env = _load_required_env()
+
+	verify_sender(sender, env["WMS_SENDER_EMAIL"])
+
+	try:
+		variants = parse_html_email(email_body)
+	except ValueError as error:
+		handle_malformed_email(
+			error=error,
+			admin_email=env["ADMIN_EMAIL"],
+			notify_admin=notify_admin,
+		)
+		raise
+
+	if not variants:
+		LOGGER.info("Email did not contain any purchase order variants; nothing to do.")
+		return "No variants found."
+
+	po_number = variants[0].po_number
+	temp_dir = Path(tempfile.mkdtemp(prefix="barcode_generator_"))
+	try:
+		barcode_paths = [
+			generate_barcode_image(variant.item_code, output_dir=temp_dir)
+			for variant in variants
+		]
+		zip_path = bundle_barcodes(po_number, barcode_paths, output_dir=temp_dir)
+		subject = build_email_subject(po_number)
+		body = build_email_body(po_number)
+		receiver_email = _resolve_recipient(env)
+		send_email_with_attachment(
+			sender_email=env["SENDER_EMAIL"],
+			receiver_email=receiver_email,
+			subject=subject,
+			body=body,
+			attachment_path=zip_path,
+		)
+		log_completed_purchase_order(
+			po_number=po_number,
+			blob_service=blob_service,
+		)
+	finally:
+		_cleanup_temp_directory(temp_dir)
+
+	return f"Successfully processed PO {po_number}."
+
 
 app = func.FunctionApp()
 
+
 @app.route(route="barcode_generator")
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Main function for the Azure Function App.
+	"""HTTP-triggered Azure Function entry point."""
 
-    This function is triggered by an HTTP request (from a Logic App).
-    It parses the email body, generates barcodes, and sends them to the supplier.
-    """
-    logging.info('Python HTTP trigger function processed a request.')
+	email_body = req.get_body().decode("utf-8")
+	sender = req.headers.get("X-Forwarded-For") or req.headers.get("X-Sender")
 
-    email_body = req.get_body().decode('utf-8')
-    
-    # Verify sender
-    sender = req.headers.get('X-Forwarded-For')
-    wms_sender = os.getenv('WMS_SENDER_EMAIL')
-    if sender != wms_sender:
-        logging.warning(f"Received email from unauthorized sender: {sender}")
-        return func.HttpResponse("Unauthorized sender.", status_code=401)
+	env = _load_required_env()
 
-    try:
-        variants = parse_html_email(email_body)
-        if not variants:
-            logging.info("No variants found in the email.")
-            return func.HttpResponse("No variants found.", status_code=200)
+	def _notify(admin_email: str, subject: str, body: str) -> None:
+		notify_admin_email(
+			admin_email=admin_email,
+			sender_email=env["SENDER_EMAIL"],
+			subject=subject,
+			body=body,
+		)
 
-        po_number = variants[0]['po_number']
-        barcode_files = []
-        for variant in variants:
-            barcode_path = generate_barcode(variant['item_code'], variant['description'])
-            barcode_files.append(barcode_path)
+	try:
+		message = process_email(
+			email_body=email_body,
+			sender=sender,
+			notify_admin=_notify,
+		)
+		status_code = 200
+	except PermissionError as error:
+		LOGGER.warning("Unauthorized sender attempted access: %s", sender)
+		return func.HttpResponse(str(error), status_code=401)
+	except ValueError as error:
+		return func.HttpResponse(str(error), status_code=400)
+	except RuntimeError as error:
+		LOGGER.error("Configuration error: %s", error)
+		return func.HttpResponse(str(error), status_code=500)
+	except Exception as error:  # noqa: BLE001
+		LOGGER.exception("Unexpected error processing purchase order email")
+		handle_malformed_email(
+			error=error,
+			admin_email=env["ADMIN_EMAIL"],
+			notify_admin=_notify,
+		)
+		return func.HttpResponse("Error processing email.", status_code=500)
 
-        zip_path = f"/tmp/{po_number}.zip"
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for file in barcode_files:
-                zipf.write(file, os.path.basename(file))
-
-        sender_email = os.getenv('SENDER_EMAIL')
-        receiver_email = os.getenv('KAPS_EMAIL')
-        subject = f"Barcode for PO {po_number}"
-        body = f"Please find attached the barcodes for purchase order {po_number}."
-        send_email_with_attachment(sender_email, receiver_email, subject, body, zip_path)
-
-        log_completed_purchase_order(po_number)
-
-        return func.HttpResponse(f"Successfully processed PO {po_number}.")
-
-    except Exception as e:
-        logging.error(f"Error processing email: {e}")
-        # Send notification email to admin
-        admin_email = os.getenv('ADMIN_EMAIL')
-        if admin_email:
-            send_email_with_attachment(sender_email, admin_email, "Error in Barcode Generator", str(e), None)
-        return func.HttpResponse("Error processing email.", status_code=500)
-
-def parse_html_email(html_content):
-    """
-    Parses the HTML email body to extract purchase order details.
-
-    Args:
-        html_content: The HTML content of the email.
-
-    Returns:
-        A list of dictionaries, where each dictionary represents a variant.
-    """
-    soup = BeautifulSoup(html_content, 'html.parser')
-    variants = []
-    for item in soup.find_all('td', style='font-family:Arial; font-size:14px; color:gray; padding-top:10px;'):
-        text = item.get_text()
-        parts = text.split('|')
-        po_number = parts[0].split(':')[1].strip()
-        item_code = parts[1].split(':')[1].strip()
-        description = parts[2].split(':')[1].strip()
-        variants.append({
-            'po_number': po_number,
-            'item_code': item_code,
-            'description': description
-        })
-    return variants
-
-def generate_barcode(variant_code, description):
-    """
-    Generates a barcode image for the given variant code and description.
-
-    Args:
-        variant_code: The variant code to generate the barcode for.
-        description: The description to include in the barcode image.
-
-    Returns:
-        The path to the generated barcode image.
-    """
-    temp_dir = tempfile.gettempdir()
-    barcode_file_path = os.path.join(temp_dir, variant_code)
-
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(variant_code)
-    qr.make(fit=True)
-    qr_image = qr.make_image(fill_color="black", back_color="white")
-    qr_image.resize((10, 10))
-    dpi = 300
-    width = int(70 * 0.0393701 * dpi)
-    height = int(30 * 0.0393701 * dpi)
-    new_image = Image.new("RGB", (width, height), "white")
-
-    # Paste the QR code to the top right corner
-    new_image.paste(qr_image, ((width // 2) + 130, 40))
-
-    # Add text
-    draw = ImageDraw.Draw(new_image)
-    main_font = ImageFont.truetype(os.path.join(basedir, "arial.ttf"), 45)
-    bold_font = ImageFont.truetype(os.path.join(basedir, "arialbd.ttf"), 100)
-    draw.text((30, 30), variant_code, font=bold_font, fill=(0, 0, 0))
-    description_words = description.split(" ")
-    max_line_width = (new_image.width // 2) + 90
-    wrapped_description = wrap_text(description_words, main_font, max_line_width)
-    draw.text((30, 160), wrapped_description, font=main_font, fill=(0, 0, 0))
-    new_image.save(barcode_file_path + ".png")
-    return barcode_file_path + ".png"
-
-def wrap_text(words: list[str], font: ImageFont.ImageFont, max_line_width_: int) -> str:
-    """
-    Wraps text to fit within a specified width.
-    :param words: The text to wrap as a list of words
-    :param font: The font to use for calculating the text size
-    :param max_line_width_: The maximum width of the text line
-    :return: The wrapped text as a string with newline characters
-    """
-    lines = []
-    current_line = []
-    for word in words:
-        # If adding a new word doesn't exceed the max width, add the word to current line
-        if font.getlength(' '.join(current_line + [word])) <= max_line_width_:
-            current_line.append(word)
-        else:
-            # If it does, add current line to lines and start a new line
-            lines.append(' '.join(current_line))
-            current_line = [word]
-    # Add the last line
-    if current_line:
-        lines.append(' '.join(current_line))
-
-    return '\n'.join(lines)
-
-def send_email_with_attachment(sender_email, receiver_email, subject, body, attachment_path):
-    """
-    Sends an email with an attachment.
-
-    Args:
-        sender_email: The sender's email address.
-        receiver_email: The receiver's email address.
-        subject: The subject of the email.
-        body: The body of the email.
-        attachment_path: The path to the attachment file.
-    """
-    msg = MIMEMultipart()
-    msg['From'] = sender_email
-    msg['To'] = receiver_email
-    msg['Subject'] = subject
-
-    msg.attach(MIMEText(body, 'plain'))
-
-    with open(attachment_path, 'rb') as attachment:
-        part = MIMEBase('application', 'octet-stream')
-        part.set_payload(attachment.read())
-    
-    encoders.encode_base64(part)
-    
-    part.add_header(
-        'Content-Disposition',
-        f'attachment; filename= {os.path.basename(attachment_path)}',
-    )
-    
-    msg.attach(part)
-    
-    server = smtplib.SMTP("smtp.test.com", 587)
-    server.sendmail(sender_email, receiver_email, msg.as_string())
-    server.quit()
-
-def log_completed_purchase_order(po_number):
-    """
-    Logs a completed purchase order to a text file in Azure Blob Storage.
-
-    Args:
-        po_number: The purchase order number to log.
-    """
-    connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
-    container_name = "completed-purchase-orders"
-    blob_name = f"completed_pos_{datetime.utcnow().strftime('%Y-%m-%d')}.log"
-
-    blob_service_client = BlobServiceClient.from_connection_string(connect_str)
-    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-
-    log_entry = f"{datetime.utcnow().isoformat()}: {po_number}\n"
-
-    try:
-        blob_properties = blob_client.get_blob_properties()
-        existing_content = blob_client.download_blob().readall()
-        new_content = existing_content + log_entry.encode('utf-8')
-        blob_client.upload_blob(new_content, overwrite=True)
-    except Exception:
-        blob_client.upload_blob(log_entry.encode('utf-8'))
+	return func.HttpResponse(message, status_code=status_code)
