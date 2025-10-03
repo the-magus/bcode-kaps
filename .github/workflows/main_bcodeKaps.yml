@@ -52,3 +52,4 @@ jobs:
           package: functionapp.zip
           scm-do-build-during-deployment: true
           enable-oryx-build: true
+          remote-build: true
