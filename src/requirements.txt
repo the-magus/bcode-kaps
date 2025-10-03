@@ -1,6 +1,7 @@
 azure-functions
 beautifulsoup4
-qrcode
+python-barcode
 Pillow
 pytest
+cryptography==41.0.7
 azure-storage-blob
