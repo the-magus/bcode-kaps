@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional, Set
 
 import logging
 import os
@@ -196,31 +196,50 @@ def handle_malformed_email(
 		)
 
 
-def log_completed_purchase_order(
+
+def _ensure_blob_service(blob_service: Optional[BlobServiceClient]) -> BlobServiceClient:
+	if blob_service is not None:
+		return blob_service
+
+	connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+	if not connection_string:
+		raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING is not configured.")
+	return BlobServiceClient.from_connection_string(connection_string)
+
+
+def fetch_processed_purchase_orders(
 	*,
-	po_number: str,
 	blob_service: Optional[BlobServiceClient] = None,
 	container_name: str = "completed-purchase-orders",
-) -> None:
-	"""Append a completion record for the purchase order to Azure Blob Storage."""
+	blob_name: str = "processed_pos.log",
+) -> Set[str]:
+	"""Return the set of purchase orders that have already been processed."""
 
-	if blob_service is None:
-		connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-		if not connection_string:
-			raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING is not configured.")
-		blob_service = BlobServiceClient.from_connection_string(connection_string)
-
-	blob_name = f"completed_pos_{datetime.utcnow().strftime('%Y-%m-%d')}.log"
+	blob_service = _ensure_blob_service(blob_service)
 	blob_client = blob_service.get_blob_client(container=container_name, blob=blob_name)
 
-	entry = f"{datetime.utcnow().isoformat()}: {po_number}\n".encode("utf-8")
-
 	try:
-		existing = blob_client.download_blob().readall()
-	except Exception:  # Blob may not exist yet.
-		existing = b""
+		contents = blob_client.download_blob().readall().decode("utf-8")
+	except Exception:
+		return set()
 
-	blob_client.upload_blob(existing + entry, overwrite=True)
+	return {line.strip() for line in contents.splitlines() if line.strip()}
+
+
+def persist_processed_purchase_orders(
+	*,
+	processed_orders: Set[str],
+	blob_service: Optional[BlobServiceClient] = None,
+	container_name: str = "completed-purchase-orders",
+	blob_name: str = "processed_pos.log",
+) -> None:
+	"""Write the canonical list of processed purchase orders to Blob Storage."""
+
+	blob_service = _ensure_blob_service(blob_service)
+	blob_client = blob_service.get_blob_client(container=container_name, blob=blob_name)
+
+	data = "\n".join(sorted(processed_orders)) + "\n"
+	blob_client.upload_blob(data.encode("utf-8"), overwrite=True)
 
 
 def build_email_body(po_number: str) -> str:
@@ -319,6 +338,11 @@ def process_email(
 		return "No variants found."
 
 	po_number = variants[0].po_number
+	processed_orders = fetch_processed_purchase_orders(blob_service=blob_service)
+	if po_number in processed_orders:
+		LOGGER.info("Purchase order %s already processed; skipping.", po_number)
+		return f"PO {po_number} was already processed."
+
 	temp_dir = Path(tempfile.mkdtemp(prefix="barcode_generator_"))
 	try:
 		barcode_paths = [
@@ -336,8 +360,9 @@ def process_email(
 			body=body,
 			attachment_path=zip_path,
 		)
-		log_completed_purchase_order(
-			po_number=po_number,
+		processed_orders.add(po_number)
+		persist_processed_purchase_orders(
+			processed_orders=processed_orders,
 			blob_service=blob_service,
 		)
 	finally:

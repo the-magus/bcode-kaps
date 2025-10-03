@@ -20,7 +20,7 @@ The Function App is triggered by an email from a Warehouse Management System (WM
 
     | Variable | Purpose |
     | --- | --- |
-    | `AZURE_STORAGE_CONNECTION_STRING` | Connection string for the storage account that stores completed purchase order logs. |
+    | `AZURE_STORAGE_CONNECTION_STRING` | Connection string for the storage account that stores the `processed_pos.log` canonical record. |
     | `WMS_SENDER_EMAIL` | Authoritative sender address for inbound purchase order emails. |
     | `SENDER_EMAIL` | Outbound email address used when contacting Kaps and the administrator. |
     | `KAPS_EMAIL` | Destination address for barcode deliveries. |
@@ -56,7 +56,7 @@ Once the Logic App is wired to the mailbox, each matching email automatically tr
 1. Verifies the sender address.
 2. Parses variant rows from the HTML body.
 3. Generates Code128 barcodes and zips them using the purchase order number as the filename.
-4. Emails the archive to Kaps and logs completion details to Azure Blob Storage.
+4. Emails the archive to Kaps (or the admin while verification mode is enabled) and records the purchase order number in `processed_pos.log` so duplicates are ignored on subsequent runs.
 
 If the email is malformed, the function logs the issue and sends an alert to the administrator without contacting Kaps.
 
@@ -74,4 +74,4 @@ If the email is malformed, the function logs the issue and sends an alert to the
 ## Operations
 
 - Operational runbooks and reliability guidance live in `docs/operations.md`.
-- Blob storage logs (`completed_pos_YYYY-MM-DD.log`) contain a timestamped history of processed purchase orders for auditing.
+- Blob storage contains a canonical `processed_pos.log` file holding all completed purchase orders. Seed this file with any historic POs (one per line) to prevent the app from reprocessing them.

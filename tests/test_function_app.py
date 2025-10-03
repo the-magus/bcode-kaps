@@ -1,6 +1,6 @@
 from pathlib import Path
 import zipfile
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -10,7 +10,8 @@ from src.function_app import (
     build_email_subject,
     generate_barcode_image,
     handle_malformed_email,
-    log_completed_purchase_order,
+    fetch_processed_purchase_orders,
+    persist_processed_purchase_orders,
     process_email,
     parse_html_email,
     send_email_with_attachment,
@@ -36,6 +37,18 @@ SAMPLE_HTML = """
   </body>
 </html>
 """
+
+
+def _make_blob_service(existing: str = ""):
+    blob_service = MagicMock()
+    blob_client = MagicMock()
+    blob_service.get_blob_client.return_value = blob_client
+
+    download_blob = MagicMock()
+    download_blob.readall.return_value = existing.encode()
+    blob_client.download_blob.return_value = download_blob
+
+    return blob_service, blob_client
 
 
 def test_parse_html_email_returns_variants():
@@ -146,7 +159,48 @@ def test_handle_malformed_email_logs_and_notifies(caplog):
     assert "Unparseable email" in caplog.text
 
 
-def test_log_completed_purchase_order_appends_entry(tmp_path: Path):
+def test_fetch_processed_purchase_orders_returns_set():
+    blob_service = MagicMock()
+    blob_client = blob_service.get_blob_client.return_value
+
+    download_blob = MagicMock()
+    download_blob.readall.return_value = b"UPD-PO123\nUPD-PO456\n"
+    blob_client.download_blob.return_value = download_blob
+
+    processed = fetch_processed_purchase_orders(
+        blob_service=blob_service,
+        container_name="completed-purchase-orders",
+        blob_name="processed_pos.log",
+    )
+
+    blob_service.get_blob_client.assert_called_once_with(
+        container="completed-purchase-orders",
+        blob="processed_pos.log",
+    )
+    assert processed == {"UPD-PO123", "UPD-PO456"}
+
+
+def test_persist_processed_purchase_orders_writes_sorted_lines():
+    blob_service = MagicMock()
+    blob_client = blob_service.get_blob_client.return_value
+
+    persist_processed_purchase_orders(
+        processed_orders={"UPD-PO222", "UPD-PO111"},
+        blob_service=blob_service,
+        container_name="completed-purchase-orders",
+        blob_name="processed_pos.log",
+    )
+
+    blob_service.get_blob_client.assert_called_once_with(
+        container="completed-purchase-orders",
+        blob="processed_pos.log",
+    )
+    upload_args, upload_kwargs = blob_client.upload_blob.call_args
+    assert upload_args[0] == b"UPD-PO111\nUPD-PO222\n"
+    assert upload_kwargs == {"overwrite": True}
+
+
+def test_persist_processed_purchase_orders_appends_to_existing(tmp_path: Path):
     blob_service = MagicMock()
     blob_client = blob_service.get_blob_client.return_value
 
@@ -154,19 +208,20 @@ def test_log_completed_purchase_order_appends_entry(tmp_path: Path):
     download_blob.readall.return_value = b"existing\n"
     blob_client.download_blob.return_value = download_blob
 
-    log_completed_purchase_order(
-        po_number="UPD-PO27652",
+    existing = fetch_processed_purchase_orders(
         blob_service=blob_service,
         container_name="completed-purchase-orders",
+        blob_name="processed_pos.log",
     )
 
-    blob_service.get_blob_client.assert_called_once_with(
-        container="completed-purchase-orders",
-        blob=ANY,
+    persist_processed_purchase_orders(
+        processed_orders=existing | {"UPD-PO27652"},
+        blob_service=blob_service,
+        container_name="completed-purchase-orders",
+        blob_name="processed_pos.log",
     )
-    upload_args, upload_kwargs = blob_client.upload_blob.call_args
-    assert b"UPD-PO27652" in upload_args[0]
-    assert upload_kwargs == {"overwrite": True}
+
+    assert blob_client.upload_blob.call_count == 1
 
 
 def test_process_email_routes_messages_to_admin(monkeypatch, tmp_path: Path):
@@ -195,11 +250,12 @@ def test_process_email_routes_messages_to_admin(monkeypatch, tmp_path: Path):
         patch("src.function_app.bundle_barcodes", side_effect=fake_bundle),
         patch("src.function_app.send_email_with_attachment") as send_email_mock,
     ):
+        blob_service, blob_client = _make_blob_service()
         message = process_email(
             email_body=SAMPLE_HTML,
             sender="wms@example.com",
             notify_admin=lambda *_args, **_kwargs: None,
-            blob_service=MagicMock(),
+            blob_service=blob_service,
         )
 
     assert message == "Successfully processed PO UPD-PO27652."
@@ -207,6 +263,7 @@ def test_process_email_routes_messages_to_admin(monkeypatch, tmp_path: Path):
     kwargs = send_email_mock.call_args.kwargs
     assert kwargs["receiver_email"] == "admin@example.com"
     assert kwargs["sender_email"] == "noreply@example.com"
+    blob_client.upload_blob.assert_called_once()
 
 
 def test_process_email_can_target_kaps_when_verification_disabled(monkeypatch, tmp_path: Path):
@@ -235,13 +292,38 @@ def test_process_email_can_target_kaps_when_verification_disabled(monkeypatch, t
         patch("src.function_app.bundle_barcodes", side_effect=fake_bundle),
         patch("src.function_app.send_email_with_attachment") as send_email_mock,
     ):
+        blob_service, blob_client = _make_blob_service()
         process_email(
             email_body=SAMPLE_HTML,
             sender="wms@example.com",
             notify_admin=lambda *_args, **_kwargs: None,
-            blob_service=MagicMock(),
+            blob_service=blob_service,
         )
 
     send_email_mock.assert_called_once()
     kwargs = send_email_mock.call_args.kwargs
     assert kwargs["receiver_email"] == "kaps@example.com"
+    blob_client.upload_blob.assert_called_once()
+
+
+def test_process_email_skips_previously_processed_order(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("WMS_SENDER_EMAIL", "wms@example.com")
+    monkeypatch.setenv("SENDER_EMAIL", "noreply@example.com")
+    monkeypatch.setenv("KAPS_EMAIL", "kaps@example.com")
+    monkeypatch.setenv("ADMIN_EMAIL", "admin@example.com")
+
+    working_dir = tmp_path / "dup"
+    working_dir.mkdir()
+    monkeypatch.setattr("src.function_app.tempfile.mkdtemp", lambda prefix=None: str(working_dir))
+
+    blob_service, blob_client = _make_blob_service(existing="UPD-PO27652\n")
+
+    message = process_email(
+        email_body=SAMPLE_HTML,
+        sender="wms@example.com",
+        notify_admin=lambda *_args, **_kwargs: None,
+        blob_service=blob_service,
+    )
+
+    assert message == "PO UPD-PO27652 was already processed."
+    blob_client.upload_blob.assert_not_called()
