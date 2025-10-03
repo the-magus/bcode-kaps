@@ -40,6 +40,17 @@ jobs:
       - name: Run tests
         run: pytest
 
+      - name: Vendor function dependencies
+        run: |
+          rm -rf ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/.python_packages
+          mkdir -p ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/.python_packages/lib/site-packages
+          pip install \
+            --disable-pip-version-check \
+            --no-compile \
+            --no-cache-dir \
+            -r ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/requirements.txt \
+            --target ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/.python_packages/lib/site-packages
+
       - name: Deploy to Azure Function App
         uses: Azure/functions-action@v1
         with:
