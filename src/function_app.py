@@ -63,25 +63,24 @@ def parse_html_email(html_content: str) -> List[Variant]:
 	variants: List[Variant] = []
 	malformed_detected = False
 
-	for cell in soup.find_all(
-		"td",
-		style="font-family:Arial; font-size:14px; color:gray; padding-top:10px;",
-	):
+	for cell in soup.find_all("td"):
 		text = cell.get_text(strip=True)
-		segments = [segment.strip() for segment in text.split("|")]
-		if len(segments) != 3:
-			malformed_detected = True
-			continue
+		# Only process cells that contain both 'PO:' and 'Item:' (case-sensitive)
+		if "PO:" in text and "Item:" in text:
+			segments = [segment.strip() for segment in text.split("|")]
+			if len(segments) != 3:
+				malformed_detected = True
+				continue
 
-		try:
-			po_number = segments[0].split(":", 1)[1].strip()
-			item_code = segments[1].split(":", 1)[1].strip()
-			description = segments[2].split(":", 1)[1].strip()
-		except IndexError:
-			malformed_detected = True
-			continue
+			try:
+				po_number = segments[0].split(":", 1)[1].strip()
+				item_code = segments[1].split(":", 1)[1].strip()
+				description = segments[2].split(":", 1)[1].strip()
+			except IndexError:
+				malformed_detected = True
+				continue
 
-		variants.append(Variant(po_number, item_code, description))
+			variants.append(Variant(po_number, item_code, description))
 
 	if not variants and malformed_detected:
 		raise ValueError("Email body did not contain well-formed purchase order rows.")
