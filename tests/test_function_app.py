@@ -3,9 +3,11 @@ import zipfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PIL import Image
 
 from src.function_app import (
     Variant,
+    _extract_sender,
     bundle_barcodes,
     build_email_subject,
     generate_barcode_image,
@@ -101,10 +103,17 @@ def test_bundle_barcodes_contains_all_files(tmp_path: Path):
 
 
 def test_generate_barcode_image_creates_file(tmp_path: Path):
-    barcode_path = generate_barcode_image("V109327", output_dir=tmp_path)
+    barcode_path = generate_barcode_image(
+        "V109327",
+        "Sample description for layout validation",
+        output_dir=tmp_path,
+    )
 
     assert barcode_path.exists()
     assert barcode_path.parent == tmp_path
+
+    with Image.open(barcode_path) as image:
+        assert image.size == (826, 354)
 
 
 def test_send_email_with_attachment_uses_zip(tmp_path: Path):
@@ -124,12 +133,36 @@ def test_send_email_with_attachment_uses_zip(tmp_path: Path):
 
         smtp_mock.assert_called_once_with("smtp.test.com", 587)
         server = smtp_mock.return_value.__enter__.return_value
+        server.starttls.assert_called_once()
+        server.login.assert_not_called()
         args, kwargs = server.sendmail.call_args
         assert args[0] == "sender@example.com"
         assert args[1] == ["kaps@example.com"]
         assert "Barcodes for PO 123" in args[2]
         assert "test.zip" in args[2]
         assert kwargs == {}
+
+
+def test_send_email_with_attachment_logins_when_credentials_present(monkeypatch, tmp_path: Path):
+    attachment = tmp_path / "test.zip"
+    attachment.write_bytes(b"zip-bytes")
+
+    monkeypatch.setenv("SMTP_USERNAME", "smtp-user")
+    monkeypatch.setenv("SMTP_PASSWORD", "smtp-pass")
+
+    with patch("src.function_app.smtplib.SMTP") as smtp_mock:
+        send_email_with_attachment(
+            sender_email="sender@example.com",
+            receiver_email="kaps@example.com",
+            subject="Barcodes for PO 123",
+            body="Body",
+            attachment_path=attachment,
+            smtp_host="smtp.gmail.com",
+            smtp_port=587,
+        )
+
+        server = smtp_mock.return_value.__enter__.return_value
+        server.login.assert_called_once_with("smtp-user", "smtp-pass")
 
 
 def test_verify_sender_accepts_authorized_address():
@@ -139,6 +172,22 @@ def test_verify_sender_accepts_authorized_address():
 def test_verify_sender_rejects_unexpected_address():
     with pytest.raises(PermissionError):
         verify_sender("intruder@example.com", "wms@example.com")
+
+
+def test_extract_sender_prefers_explicit_header():
+    headers = {"X-Sender": "wms@example.com", "X-Forwarded-For": "10.0.0.1"}
+
+    assert _extract_sender(headers) == "wms@example.com"
+
+
+def test_extract_sender_handles_forwarded_for_with_ips():
+    headers = {"X-Forwarded-For": "203.0.113.4, donotreply@example.com, 10.0.0.1"}
+
+    assert _extract_sender(headers) == "donotreply@example.com"
+
+
+def test_extract_sender_returns_none_when_missing():
+    assert _extract_sender({}) is None
 
 
 def test_handle_malformed_email_logs_and_notifies(caplog):
@@ -235,7 +284,7 @@ def test_process_email_routes_messages_to_admin(monkeypatch, tmp_path: Path):
     working_dir.mkdir()
     monkeypatch.setattr("src.function_app.tempfile.mkdtemp", lambda prefix=None: str(working_dir))
 
-    def fake_generate(item_code: str, output_dir: Path) -> Path:
+    def fake_generate(item_code: str, description: str, output_dir: Path) -> Path:
         path = Path(output_dir) / f"{item_code}.png"
         path.write_bytes(b"barcode")
         return path
@@ -277,7 +326,7 @@ def test_process_email_can_target_kaps_when_verification_disabled(monkeypatch, t
     working_dir.mkdir()
     monkeypatch.setattr("src.function_app.tempfile.mkdtemp", lambda prefix=None: str(working_dir))
 
-    def fake_generate(item_code: str, output_dir: Path) -> Path:
+    def fake_generate(item_code: str, description: str, output_dir: Path) -> Path:
         path = Path(output_dir) / f"{item_code}.png"
         path.write_bytes(b"barcode")
         return path

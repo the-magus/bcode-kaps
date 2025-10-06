@@ -1,0 +1,29 @@
+# Python artefacts
+__pycache__/
+*.pyc
+
+# Local Azure emulator data
+.azurite/
+__queuestorage__/
+
+# Build and deployment archives
+*.zip
+
+# Logs and runtime traces
+*.log
+func_host.log
+processed_pos.log
+processed_pos_seed.log
+
+# Local-only utilities and settings
+publish-profile.xml
+src/local.settings.json
+local_generator.py
+AzuriteConfig
+specify_replication/
+
+# Workspace tooling
+.gemini/
+
+# Legacy artifacts
+Alert Summary - New PO Kaps.*

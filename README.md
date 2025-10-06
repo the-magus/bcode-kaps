@@ -16,15 +16,17 @@ The Function App is triggered by an email from a Warehouse Management System (WM
     pip install -r src/requirements.txt
     ```
 
-4. Provide the following environment variables (for local development place them in `src/local.settings.json`, and in production store them as Function App application settings):
+4. The Arial fonts required for label rendering are bundled under `src/fonts/` and automatically resolved by the function at runtime—no additional configuration is needed.
+
+5. Provide the following environment variables (for local development place them in `src/local.settings.json`, and in production store them as Function App application settings):
 
     | Variable | Purpose |
     | --- | --- |
     | `AZURE_STORAGE_CONNECTION_STRING` | Connection string for the storage account that stores the `processed_pos.log` canonical record. |
     | `WMS_SENDER_EMAIL` | Authoritative sender address for inbound purchase order emails. |
     | `SENDER_EMAIL` | Outbound email address used when contacting Kaps and the administrator. |
-    | `KAPS_EMAIL` | Destination address for barcode deliveries. |
-    | `ADMIN_EMAIL` | Address that receives error notifications for malformed or failed emails. |
+    | `KAPS_EMAIL` | Destination address for barcode deliveries. (Production: `tiger@kapsfinishing.co.uk`.) |
+    | `ADMIN_EMAIL` | Address that receives error notifications for malformed or failed emails. (Production: `hsatchell@upwood-distribution.co.uk`.) |
     | `EMAIL_VERIFICATION_MODE` *(optional)* | Defaults to `true`. While enabled, production emails are routed to the administrator for smoke testing. Set to `false` after verifying the deployed Function App to resume deliveries to Kaps. |
     | `SMTP_HOST` / `SMTP_PORT` *(optional)* | Override defaults for the SMTP relay used to send email if different from the local development placeholder. |
 
@@ -55,7 +57,7 @@ Once the Logic App is wired to the mailbox, each matching email automatically tr
 
 1. Verifies the sender address.
 2. Parses variant rows from the HTML body.
-3. Generates Code128 barcodes and zips them using the purchase order number as the filename.
+3. Generates QR code labels and zips them using the purchase order number as the filename.
 4. Emails the archive to Kaps (or the admin while verification mode is enabled) and records the purchase order number in `processed_pos.log` so duplicates are ignored on subsequent runs.
 
 If the email is malformed, the function logs the issue and sends an alert to the administrator without contacting Kaps.

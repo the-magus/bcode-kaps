@@ -9,7 +9,7 @@ on:
 env:
   AZURE_FUNCTIONAPP_NAME: bcodeKaps
   AZURE_FUNCTIONAPP_PACKAGE_PATH: src
-  PYTHON_VERSION: '3.11'
+  PYTHON_VERSION: '3.10'
 
 jobs:
   build-and-deploy:
@@ -35,20 +35,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/requirements.txt
-          pip install pytest python-barcode Pillow
+          pip install pytest Pillow qrcode
 
       - name: Run tests
         run: pytest
 
-      - name: Create deployment package
+      - name: Vendor function dependencies
         run: |
-          cd ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          zip -r ../functionapp.zip . -x '*__pycache__*' '*.pytest_cache*'
+          rm -rf ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/.python_packages
+          mkdir -p ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/.python_packages/lib/site-packages
+          pip install \
+            --disable-pip-version-check \
+            --no-compile \
+            --no-cache-dir \
+            -r ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/requirements.txt \
+            --target ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/.python_packages/lib/site-packages
 
       - name: Deploy to Azure Function App
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: functionapp.zip
+          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           scm-do-build-during-deployment: true
           enable-oryx-build: true
+          remote-build: true

@@ -34,7 +34,7 @@ An Azure Function App that automates sending barcode images to a supplier (Kaps)
 
 ## Technical Context
 **Language/Version**: Python 3.11
-**Primary Dependencies**: Azure Functions SDK for Python, BeautifulSoup, python-barcode, smtplib
+**Primary Dependencies**: Azure Functions SDK for Python, BeautifulSoup, qrcode, Pillow, smtplib
 **Storage**: Azure Blob Storage
 **Testing**: pytest
 **Target Platform**: Azure
