@@ -16,6 +16,7 @@ processed_pos.log
 processed_pos_seed.log
 
 # Local-only utilities and settings
+.env
 publish-profile.xml
 src/local.settings.json
 local_generator.py

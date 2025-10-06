@@ -26,6 +26,8 @@ The Function App is triggered by an email from a Warehouse Management System (WM
     | `WMS_SENDER_EMAIL` | Authoritative sender address for inbound purchase order emails. |
     | `SENDER_EMAIL` | Outbound email address used when contacting Kaps and the administrator. |
     | `KAPS_EMAIL` | Destination address for barcode deliveries. (Production: `tiger@kapsfinishing.co.uk`.) |
+    | `PURCHASING_EMAIL` *(optional)* | Purchasing team's mailbox that should also receive purchase order barcode archives. |
+    | `GOODS_IN_EMAIL` *(optional)* | Goods-in operations mailbox for awareness of incoming deliveries. |
     | `ADMIN_EMAIL` | Address that receives error notifications for malformed or failed emails. (Production: `hsatchell@upwood-distribution.co.uk`.) |
     | `EMAIL_VERIFICATION_MODE` *(optional)* | Defaults to `true`. While enabled, production emails are routed to the administrator for smoke testing. Set to `false` after verifying the deployed Function App to resume deliveries to Kaps. |
     | `SMTP_HOST` / `SMTP_PORT` *(optional)* | Override defaults for the SMTP relay used to send email if different from the local development placeholder. |
@@ -58,7 +60,7 @@ Once the Logic App is wired to the mailbox, each matching email automatically tr
 1. Verifies the sender address.
 2. Parses variant rows from the HTML body.
 3. Generates QR code labels and zips them using the purchase order number as the filename.
-4. Emails the archive to Kaps (or the admin while verification mode is enabled) and records the purchase order number in `processed_pos.log` so duplicates are ignored on subsequent runs.
+4. Builds a barcode archive for each purchase order that hasn't been processed yet, emails it to Kaps (alongside any configured purchasing and goods-in contacts, with the admin CC'd), or routes only to the admin while verification mode is enabled. Already-seen POs are logged and skipped automatically.
 
 If the email is malformed, the function logs the issue and sends an alert to the administrator without contacting Kaps.
 
@@ -66,12 +68,36 @@ If the email is malformed, the function logs the issue and sends an alert to the
 
 - Execute the unit test suite:
 
-  ```bash
-  pytest
-  ```
+    ```bash
+    pytest
+    ```
 
 - Linting is configured via `ruff.toml`; run `ruff check .` to enforce style rules.
 - Use the Functions Core Tools (`func start`) with a sample email payload to exercise the end-to-end workflow locally.
+- The `local_generator.py` helper can impersonate the Logic App trigger while you
+    wait for the production mailbox. Configure the following environment variables
+    (they can live in a `.env` file and be exported before running the script):
+
+    | Variable | Purpose |
+    | --- | --- |
+    | `LOCAL_IMAP_HOST` / `LOCAL_IMAP_PORT` | IMAP endpoint for the mailbox that receives WMS emails (port defaults to 993). |
+    | `LOCAL_IMAP_USERNAME` / `LOCAL_IMAP_PASSWORD` | Credentials used to sign in to the mailbox. |
+    | `LOCAL_IMAP_MAILBOX` | Optional folder name (defaults to `INBOX`). |
+    | `LOCAL_IMAP_SENDER` | Optional sender filter to limit the search to the WMS address. |
+    | `LOCAL_FUNCTION_ENDPOINT` | Public URL of the deployed `barcode_generator` function. |
+    | `LOCAL_FUNCTION_CODE` | Optional function key appended as the `code` query parameter. |
+    | `LOCAL_FUNCTION_SENDER` | Optional override for the `X-Sender` header when the IMAP account differs from the WMS sender. |
+
+    With the variables in place, run:
+
+    ```bash
+    python local_generator.py
+    ```
+
+    The script downloads the newest email, saves a copy to
+    `latest_po_email.html`, optionally generates local barcode archives (pass
+    `--generate-local`), and posts the HTML to the Azure Function so the end to
+    end flow is exercised without the Logic App.
 
 ## Operations
 
