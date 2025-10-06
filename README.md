@@ -16,7 +16,9 @@ The Function App is triggered by an email from a Warehouse Management System (WM
     pip install -r src/requirements.txt
     ```
 
-4. Provide the following environment variables (for local development place them in `src/local.settings.json`, and in production store them as Function App application settings):
+4. The Arial fonts required for label rendering are bundled under `src/fonts/` and automatically resolved by the function at runtime—no additional configuration is needed.
+
+5. Provide the following environment variables (for local development place them in `src/local.settings.json`, and in production store them as Function App application settings):
 
     | Variable | Purpose |
     | --- | --- |
@@ -55,7 +57,7 @@ Once the Logic App is wired to the mailbox, each matching email automatically tr
 
 1. Verifies the sender address.
 2. Parses variant rows from the HTML body.
-3. Generates Code128 barcodes and zips them using the purchase order number as the filename.
+3. Generates QR code labels and zips them using the purchase order number as the filename.
 4. Emails the archive to Kaps (or the admin while verification mode is enabled) and records the purchase order number in `processed_pos.log` so duplicates are ignored on subsequent runs.
 
 If the email is malformed, the function logs the issue and sends an alert to the administrator without contacting Kaps.
