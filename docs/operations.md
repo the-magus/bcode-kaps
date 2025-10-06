@@ -40,3 +40,8 @@ This document captures the day-to-day operational guidance for the Azure Barcode
 - The workload is sized for ~3 purchase orders per day with roughly 30 variants per order.
 - Azure Functions Consumption Plan automatically scales based on concurrency. No additional scaling actions are required under expected load.
 - If volume increases substantially, confirm that barcode generation time remains within the default Function timeout and consider moving temporary storage to Azure Files for higher throughput.
+
+## Dependency Management
+
+- Azure has advised pinning `cryptography` to mitigate upstream packaging issues. The Function App tracks `cryptography==43.0.3`; update both `src/requirements.txt` and the deployment package together if you revise this pin in the future.
+- Remote builds are enabled for deployments (`func azure functionapp publish ...`), which is the recommended workaround should dependency resolution regress again.
