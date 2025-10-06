@@ -180,7 +180,9 @@ def generate_barcode_image(
 	aspect_ratio = qr_image.height / qr_image.width
 	qr_target_height = int(qr_target_width * aspect_ratio)
 	qr_image = qr_image.resize((qr_target_width, qr_target_height))
-	label.paste(qr_image, (canvas_width - qr_target_width - 40, 40))
+	QR_IMAGE_PADDING_X = 40
+	QR_IMAGE_PADDING_Y = 40
+	label.paste(qr_image, (canvas_width - qr_target_width - QR_IMAGE_PADDING_X, QR_IMAGE_PADDING_Y))
 
 	draw = ImageDraw.Draw(label)
 	main_font = ImageFont.truetype(str(main_font_path), 45)
