@@ -11,19 +11,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Set
+from typing import Callable, Iterable, List, Mapping, Optional, Set
 
 import logging
 import os
 import smtplib
+import ssl
 import tempfile
 import zipfile
 
 import azure.functions as func
 from azure.storage.blob import BlobServiceClient
 from bs4 import BeautifulSoup
-import barcode
-from barcode.writer import ImageWriter
+import qrcode
+from PIL import Image, ImageDraw, ImageFont
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -89,11 +90,61 @@ def parse_html_email(html_content: str) -> List[Variant]:
 	return variants
 
 
-def generate_barcode_image(item_code: str, output_dir: Optional[Path] = None) -> Path:
-	"""Generate a Code128 barcode image for a variant.
+def _resolve_font_file(filename: str) -> Path:
+	"""Return the first existing path for ``filename`` across known locations."""
+
+	candidates = [
+		Path(__file__).resolve().parent / filename,
+		Path(__file__).resolve().parent / "fonts" / filename,
+		Path(__file__).resolve().parent.parent / filename,
+	]
+
+	for candidate in candidates:
+		if candidate.exists():
+			return candidate
+
+	raise FileNotFoundError(
+		f"Required font file '{filename}' not found. Ensure it is bundled with the function deployment."
+	)
+
+
+def _wrap_text(words: List[str], font: ImageFont.ImageFont, max_width: int) -> str:
+	"""Return wrapped text that fits within ``max_width`` pixels for the font."""
+
+	lines: List[str] = []
+	current_line: List[str] = []
+
+	for word in words:
+		candidate = " ".join(current_line + [word])
+		if font.getlength(candidate) <= max_width:
+			current_line.append(word)
+		else:
+			if current_line:
+				lines.append(" ".join(current_line))
+			current_line = [word]
+
+	if current_line:
+		lines.append(" ".join(current_line))
+
+	return "\n".join(lines)
+
+
+def generate_barcode_image(
+	item_code: str,
+	description: str,
+	output_dir: Optional[Path] = None,
+) -> Path:
+	"""Generate a legacy-formatted QR label image for a purchase-order line.
+
+	The layout matches the historical on-premise tooling:
+
+	* 70mm x 30mm canvas rendered at 300 DPI (826 x 354 pixels)
+	* Variant code rendered in Arial Bold above wrapped description text
+	* QR code positioned on the right-hand side with 40px padding
 
 	Args:
 		item_code: SKU for which to create the barcode.
+		description: Human-readable description printed beneath the code.
 		output_dir: Directory where the file should be written. Defaults to the
 			system temporary directory.
 
@@ -104,10 +155,45 @@ def generate_barcode_image(item_code: str, output_dir: Optional[Path] = None) ->
 	target_dir = Path(output_dir or tempfile.gettempdir())
 	target_dir.mkdir(parents=True, exist_ok=True)
 
-	code128 = barcode.get_barcode_class("code128")
-	barcode_image = code128(item_code, writer=ImageWriter())
-	saved_path = Path(barcode_image.save(str(target_dir / item_code)))
-	return saved_path if saved_path.suffix else saved_path.with_suffix(".png")
+	main_font_path = _resolve_font_file("arial.ttf")
+	bold_font_path = _resolve_font_file("arialbd.ttf")
+
+	# Create QR code matching the historical configuration.
+	qr = qrcode.QRCode(
+		version=1,
+		error_correction=qrcode.constants.ERROR_CORRECT_L,
+		box_size=10,
+		border=4,
+	)
+	qr.add_data(item_code)
+	qr.make(fit=True)
+	qr_image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+	# Canvas dimensions at 300 DPI for 70mm x 30mm labels.
+	dpi = 300
+	canvas_width = int(70 * 0.0393701 * dpi)
+	canvas_height = int(30 * 0.0393701 * dpi)
+	label = Image.new("RGB", (canvas_width, canvas_height), "white")
+
+	# Resize QR image to match legacy layout.
+	qr_target_width = 150
+	aspect_ratio = qr_image.height / qr_image.width
+	qr_target_height = int(qr_target_width * aspect_ratio)
+	qr_image = qr_image.resize((qr_target_width, qr_target_height))
+	label.paste(qr_image, (canvas_width - qr_target_width - 40, 40))
+
+	draw = ImageDraw.Draw(label)
+	main_font = ImageFont.truetype(str(main_font_path), 45)
+	bold_font = ImageFont.truetype(str(bold_font_path), 100)
+
+	draw.text((30, 30), item_code, font=bold_font, fill=(0, 0, 0))
+	wrapped_description = _wrap_text(description.split(), main_font, (label.width // 2) + 200)
+	draw.text((30, 160), wrapped_description, font=main_font, fill=(0, 0, 0))
+
+	safe_name = "".join(char for char in item_code if char.isalnum()) or "barcode"
+	image_path = target_dir / f"{safe_name}.png"
+	label.save(image_path)
+	return image_path
 
 
 def bundle_barcodes(
@@ -144,10 +230,28 @@ def send_email_with_attachment(
 	smtp_host: Optional[str] = None,
 	smtp_port: Optional[int] = None,
 ) -> None:
-	"""Send an email, optionally attaching the provided file."""
+	"""Send an email, optionally attaching the provided file.
+
+	If ``SMTP_USERNAME`` and ``SMTP_PASSWORD`` environment variables are present the
+	connection upgrades to TLS and authenticates with those credentials before
+	sending the message. This enables compatibility with providers such as Gmail
+	that require STARTTLS + login on port 587.
+	"""
 
 	smtp_host = smtp_host or os.getenv("SMTP_HOST", "smtp.test.com")
 	smtp_port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
+	smtp_username = os.getenv("SMTP_USERNAME")
+	smtp_password = os.getenv("SMTP_PASSWORD")
+	LOGGER.info(
+		"SMTP configuration env overrides host=%s port=%s",
+		os.getenv("SMTP_HOST"),
+		os.getenv("SMTP_PORT"),
+	)
+
+	if smtp_username and not smtp_password:
+		raise RuntimeError("SMTP_PASSWORD must be set when SMTP_USERNAME is provided.")
+	if smtp_password and not smtp_username:
+		raise RuntimeError("SMTP_USERNAME must be set when SMTP_PASSWORD is provided.")
 
 	message = MIMEMultipart()
 	message["From"] = sender_email
@@ -166,8 +270,39 @@ def send_email_with_attachment(
 		)
 		message.attach(part)
 
+	context = ssl.create_default_context()
+	LOGGER.info("Connecting to SMTP host %s:%s", smtp_host, smtp_port)
 	with smtplib.SMTP(smtp_host, smtp_port) as server:
+		server.ehlo()
+		try:
+			server.starttls(context=context)
+		except smtplib.SMTPNotSupportedError:
+			LOGGER.warning("SMTP server %s:%s does not support STARTTLS", smtp_host, smtp_port)
+		else:
+			server.ehlo()
+		if smtp_username and smtp_password:
+			server.login(smtp_username, smtp_password)
 		server.sendmail(sender_email, [receiver_email], message.as_string())
+
+
+def _extract_sender(headers: Mapping[str, str]) -> Optional[str]:
+	"""Resolve the WMS sender email from HTTP headers.
+
+	The Logic App sets either ``X-Sender`` or ``X-Forwarded-For``. Azure also injects
+	client IPs into ``X-Forwarded-For`` which means the header can contain multiple
+	comma-separated values. This helper normalizes that into the first entry that
+	looks like an email address.
+	"""
+
+	for header_name in ("X-Sender", "X-Forwarded-For"):
+		raw_value = headers.get(header_name)
+		if not raw_value:
+			continue
+		for candidate in (value.strip() for value in raw_value.split(",")):
+			if "@" in candidate:
+				return candidate
+
+	return None
 
 
 def verify_sender(actual_sender: Optional[str], expected_sender: Optional[str]) -> None:
@@ -346,7 +481,11 @@ def process_email(
 	temp_dir = Path(tempfile.mkdtemp(prefix="barcode_generator_"))
 	try:
 		barcode_paths = [
-			generate_barcode_image(variant.item_code, output_dir=temp_dir)
+			generate_barcode_image(
+				variant.item_code,
+				variant.description,
+				output_dir=temp_dir,
+			)
 			for variant in variants
 		]
 		zip_path = bundle_barcodes(po_number, barcode_paths, output_dir=temp_dir)
@@ -380,7 +519,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 	"""HTTP-triggered Azure Function entry point."""
 
 	email_body = req.get_body().decode("utf-8")
-	sender = req.headers.get("X-Forwarded-For") or req.headers.get("X-Sender")
+	sender = _extract_sender(req.headers)
 
 	env = _load_required_env()
 
