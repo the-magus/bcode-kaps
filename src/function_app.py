@@ -289,14 +289,30 @@ def send_email_with_attachment(
 def _extract_sender(headers: Mapping[str, str]) -> Optional[str]:
 	"""Resolve the WMS sender email from HTTP headers.
 
-	The Logic App sets either ``X-Sender`` or ``X-Forwarded-For``. Azure also injects
-	client IPs into ``X-Forwarded-For`` which means the header can contain multiple
-	comma-separated values. This helper normalizes that into the first entry that
-	looks like an email address.
+	The Logic App forwards the original sender via ``X-Sender`` or
+	``X-Forwarded-For``. Azure Functions normalises header keys to lowercase, so the
+	lookup must be case-insensitive. ``X-Forwarded-For`` may contain multiple
+	values (IP addresses followed by emails) separated by commas; we choose the
+	first token that resembles an email address.
 	"""
 
-	for header_name in ("X-Sender", "X-Forwarded-For"):
-		raw_value = headers.get(header_name)
+	if not headers:
+		return None
+
+	normalized_headers = {key.lower(): value for key, value in headers.items() if value}
+
+	# Debug-level logging to help diagnose header propagation in production without
+	# spamming normal logs.
+	LOGGER.debug(
+		"Sender header candidates",  # noqa: TRY400
+		extra={
+			"x_sender": normalized_headers.get("x-sender"),
+			"x_forwarded_for": normalized_headers.get("x-forwarded-for"),
+		},
+	)
+
+	for header_name in ("x-sender", "x-forwarded-for"):
+		raw_value = normalized_headers.get(header_name)
 		if not raw_value:
 			continue
 		for candidate in (value.strip() for value in raw_value.split(",")):

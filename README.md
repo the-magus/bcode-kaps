@@ -27,7 +27,7 @@ The Function App is triggered by an email from a Warehouse Management System (WM
     | `SENDER_EMAIL` | Outbound email address used when contacting Kaps and the administrator. |
     | `KAPS_EMAIL` | Destination address for barcode deliveries. (Production: `tiger@kapsfinishing.co.uk`.) |
     | `PURCHASING_EMAIL` *(optional)* | Purchasing team's mailbox that should also receive purchase order barcode archives. |
-    | `GOODS_IN_EMAIL` *(optional)* | Goods-in operations mailbox for awareness of incoming deliveries. |
+    | `GOODS_IN_EMAIL` *(optional)* | Goods-in operations mailbox for awareness of incoming deliveries. (Production: `goods-in@upwooddistribution.co.uk`.) |
     | `ADMIN_EMAIL` | Address that receives error notifications for malformed or failed emails. (Production: `hsatchell@upwood-distribution.co.uk`.) |
     | `EMAIL_VERIFICATION_MODE` *(optional)* | Defaults to `true`. While enabled, production emails are routed to the administrator for smoke testing. Set to `false` after verifying the deployed Function App to resume deliveries to Kaps. |
     | `SMTP_HOST` / `SMTP_PORT` *(optional)* | Override defaults for the SMTP relay used to send email if different from the local development placeholder. |

@@ -6,6 +6,7 @@
 - Use the roadmap as the source of truth for scope, milestones, decisions, and open risks. Reference it explicitly in handoffs and status updates.
 - The Gemini/Specify toolkit (or any structured planning toolkit) is optional. Use it when it accelerates planning, but you are not required to run every task through it. If you do invoke such tooling, follow the guidance below and clean up any temporary artifacts afterwards.
 - Follow the documentation, testing, and inline-commenting rules listed below for all changes.
+- Default to cooperative execution of user directives. Attempt feasible actions promptly, surface precise blockers when they exist, and avoid drawn-out debates—ask for clarification only when it directly unblocks the work.
 
 ## Planning & Roadmap Discipline
 - Create or update a roadmap Markdown file at the start of each initiative (for example `docs/<initiative>-roadmap.md`).

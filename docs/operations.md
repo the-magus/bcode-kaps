@@ -35,6 +35,13 @@ This document captures the day-to-day operational guidance for the Azure Barcode
    - Confirm the sender mailbox has permission to send to Kaps and the administrator.
    - Resend the most recent purchase order archive manually if Kaps did not receive it.
 
+   5. **Historic PO regeneration**
+      - Copy `processed_pos.log` to a dated backup (for example `processed_pos.log.bak-YYYYMMDD`).
+      - Remove the target PO entries from the active log so the local generator treats them as pending.
+      - Run `python local_generator.py --source=file --html-file latest_po_email.html --generate-local --no-post` to produce replacement archives in `barcodes/`.
+      - After validating the zips, append the regenerated PO numbers back into `processed_pos.log` and restore the backup if further recoveries are unnecessary.
+      - Update the historic PO roadmap with the run date and inform stakeholders that regenerated archives are available.
+
 ## Capacity & Scaling
 
 - The workload is sized for ~3 purchase orders per day with roughly 30 variants per order.

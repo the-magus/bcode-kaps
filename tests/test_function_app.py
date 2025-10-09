@@ -180,10 +180,22 @@ def test_extract_sender_prefers_explicit_header():
     assert _extract_sender(headers) == "wms@example.com"
 
 
+def test_extract_sender_is_case_insensitive():
+	headers = {"x-sender": "donotreply@example.com"}
+
+	assert _extract_sender(headers) == "donotreply@example.com"
+
+
 def test_extract_sender_handles_forwarded_for_with_ips():
     headers = {"X-Forwarded-For": "203.0.113.4, donotreply@example.com, 10.0.0.1"}
 
     assert _extract_sender(headers) == "donotreply@example.com"
+
+
+def test_extract_sender_skips_forwarded_for_when_no_email():
+	headers = {"X-Forwarded-For": "203.0.113.4, 10.0.0.1"}
+
+	assert _extract_sender(headers) is None
 
 
 def test_extract_sender_returns_none_when_missing():

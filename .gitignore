@@ -14,6 +14,7 @@ __queuestorage__/
 func_host.log
 processed_pos.log
 processed_pos_seed.log
+processed_pos.log.bak*
 
 # Local-only utilities and settings
 .env
